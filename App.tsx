@@ -5,13 +5,15 @@ import { HazardCard } from './components/HazardCard';
 import { analyzeHazards } from './services/geminiService';
 import { AnalysisState, ErrorType } from './types';
 
-// تعريف الواجهات البرمجية الخاصة بـ AI Studio
+// تعريف الواجهات البرمجية الخاصة بـ AI Studio لضمان التوافق مع الأنواع العالمية
 declare global {
+  interface AIStudio {
+    hasSelectedApiKey: () => Promise<boolean>;
+    openSelectKey: () => Promise<void>;
+  }
+
   interface Window {
-    aistudio: {
-      hasSelectedApiKey: () => Promise<boolean>;
-      openSelectKey: () => Promise<void>;
-    };
+    aistudio: AIStudio;
   }
 }
 
@@ -30,6 +32,7 @@ const App: React.FC = () => {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const [isRecording, setIsRecording] = useState(false);
+  const [cameraLoading, setCameraLoading] = useState(false);
   
   // Camera Controls State
   const [videoTrack, setVideoTrack] = useState<MediaStreamTrack | null>(null);
@@ -69,30 +72,59 @@ const App: React.FC = () => {
   };
 
   const startCamera = async () => {
+    setCameraLoading(true);
+    setAnalysis(prev => ({ ...prev, error: null, errorType: null }));
+    
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }, 
+      // محاولة الحصول على الكاميرا الخلفية أولاً، وإذا فشلت نستخدم أي كاميرا متاحة
+      const constraints: MediaStreamConstraints = {
+        video: { 
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }, 
         audio: true 
-      });
-      if (videoRef.current) videoRef.current.srcObject = stream;
+      };
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("المتصفح لا يدعم الوصول للكاميرا. يرجى استخدام متصفح حديث (Chrome/Safari) وعبر رابط HTTPS.");
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        // التأكد من تشغيل الفيديو فور تحميل البيانات الوصفية
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current?.play().catch(e => console.error("Video play error:", e));
+          setCameraLoading(false);
+        };
+      }
+
       const track = stream.getVideoTracks()[0];
       setVideoTrack(track);
+
       if (track && (track as any).getCapabilities) {
         const caps = (track as any).getCapabilities();
         setCapabilities(caps);
         if (caps && caps.zoom) setZoomValue(caps.zoom.min || 1);
       }
-      setAnalysis(prev => ({ ...prev, error: null, errorType: null }));
     } catch (err: any) {
-      let errorMessage = "حدث خطأ عند تشغيل الكاميرا. يرجى التأكد من أنك تستخدم رابطاً آمناً (HTTPS).";
+      setCameraLoading(false);
+      let errorMessage = "حدث خطأ عند تشغيل الكاميرا. يرجى التأكد من السماح بالصلاحيات واستخدام رابط HTTPS.";
       let type: ErrorType = 'UNKNOWN';
+      
       if (err.name === 'NotAllowedError') {
-        errorMessage = "تم رفض الوصول للكاميرا. يرجى تفعيل الصلاحيات من إعدادات المتصفح للمتابعة.";
+        errorMessage = "تم رفض الوصول للكاميرا. يرجى منح الصلاحيات من إعدادات المتصفح وإعادة تحميل الصفحة.";
         type = 'CAMERA_DENIED';
-      } else if (err.name === 'NotFoundError') {
-        errorMessage = "لم يتم العثور على كاميرا. إذا كنت تستخدم متصفحاً على الكمبيوتر، تأكد من توصيل الكاميرا.";
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        errorMessage = "لم يتم العثور على أي كاميرا متصلة بالجهاز.";
         type = 'CAMERA_NOT_FOUND';
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        errorMessage = "الكاميرا قيد الاستخدام من قبل تطبيق آخر أو بها عطل فني.";
+        type = 'NETWORK';
       }
+      
       setAnalysis(prev => ({ ...prev, error: errorMessage, errorType: type }));
     }
   };
@@ -105,6 +137,7 @@ const App: React.FC = () => {
     setVideoTrack(null);
     setCapabilities(null);
     setIsTorchOn(false);
+    setCameraLoading(false);
   };
 
   const handleZoomChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -167,7 +200,6 @@ const App: React.FC = () => {
   const handleOpenKeySelection = async () => {
     try {
       await window.aistudio.openSelectKey();
-      // بعد اختيار المفتاح، نحاول التشغيل مرة أخرى
       runAnalysis();
     } catch (e) {
       console.error("Failed to open key selection", e);
@@ -177,7 +209,6 @@ const App: React.FC = () => {
   const runAnalysis = async () => {
     if (!mediaData) return;
     
-    // التحقق من وجود مفتاح API (اختياري حسب البيئة، لكنه يساعد في حل مشكلة "الرابط لا يعمل")
     if (typeof window.aistudio !== 'undefined') {
       const hasKey = await window.aistudio.hasSelectedApiKey();
       if (!hasKey && !process.env.API_KEY) {
@@ -244,7 +275,7 @@ const App: React.FC = () => {
                 التقاط صورة
               </button>
               <button onClick={() => {setMode('video'); reset();}} className={`flex items-center gap-3 px-8 py-3 rounded-xl text-sm font-black transition-all duration-500 ${mode === 'video' ? 'bg-white shadow-xl text-slate-900 scale-105' : 'text-slate-400 hover:text-slate-600'}`}>
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2-2v8a2 2 0 002 2z" /></svg>
                 تسجيل فيديو
               </button>
             </div>
@@ -261,45 +292,64 @@ const App: React.FC = () => {
                   <p className="mt-8 text-slate-400 text-sm font-black tracking-wide">أو اسحب الملف وأفلته هنا</p>
                 </div>
               ) : (
-                <div className="relative w-full aspect-video group/camera">
+                <div className="relative w-full aspect-video group/camera bg-black">
+                  {cameraLoading && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-white z-20">
+                      <div className="w-12 h-12 border-4 border-yellow-500 border-t-transparent rounded-full animate-spin mb-4" />
+                      <p className="font-bold">جاري تشغيل الكاميرا...</p>
+                    </div>
+                  )}
+                  
+                  {analysis.errorType === 'CAMERA_DENIED' && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-white p-8 text-center z-20">
+                      <svg className="w-16 h-16 text-red-500 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                      <h4 className="text-xl font-bold mb-2">تم رفض الوصول للكاميرا</h4>
+                      <p className="text-sm opacity-80 mb-6">يرجى منح الصلاحية من إعدادات المتصفح وإعادة المحاولة</p>
+                      <button onClick={startCamera} className="bg-yellow-500 text-slate-900 px-8 py-3 rounded-xl font-bold">إعادة المحاولة</button>
+                    </div>
+                  )}
+
                   <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20 flex flex-col justify-between p-6 opacity-0 group-hover/camera:opacity-100 transition-opacity duration-300">
-                    <div className="flex justify-between items-start">
-                      <div className="flex gap-4">
-                        {capabilities?.torch && (
-                          <button onClick={toggleTorch} className={`w-12 h-12 rounded-2xl flex items-center justify-center backdrop-blur-md transition-all ${isTorchOn ? 'bg-yellow-500 text-slate-900 shadow-lg shadow-yellow-500/40' : 'bg-black/40 text-white hover:bg-black/60'}`}>
-                            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" /></svg>
-                          </button>
+                  
+                  {!cameraLoading && !analysis.error && (
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20 flex flex-col justify-between p-6 opacity-0 group-hover/camera:opacity-100 transition-opacity duration-300">
+                      <div className="flex justify-between items-start">
+                        <div className="flex gap-4">
+                          {capabilities?.torch && (
+                            <button onClick={toggleTorch} className={`w-12 h-12 rounded-2xl flex items-center justify-center backdrop-blur-md transition-all ${isTorchOn ? 'bg-yellow-500 text-slate-900 shadow-lg shadow-yellow-500/40' : 'bg-black/40 text-white hover:bg-black/60'}`}>
+                              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" /></svg>
+                            </button>
+                          )}
+                        </div>
+                        {isRecording && (
+                          <div className="bg-red-600 text-white px-4 py-2 rounded-2xl flex items-center gap-3 shadow-xl animate-pulse">
+                            <div className="w-2.5 h-2.5 bg-white rounded-full" />
+                            <span className="font-black text-sm tracking-widest">{formatTime(recordingSeconds)}</span>
+                          </div>
                         )}
                       </div>
-                      {isRecording && (
-                        <div className="bg-red-600 text-white px-4 py-2 rounded-2xl flex items-center gap-3 shadow-xl animate-pulse">
-                          <div className="w-2.5 h-2.5 bg-white rounded-full" />
-                          <span className="font-black text-sm tracking-widest">{formatTime(recordingSeconds)}</span>
-                        </div>
-                      )}
-                    </div>
-                    <div className="space-y-8">
-                      {capabilities?.zoom && (
-                        <div className="flex flex-col items-center gap-3">
-                          <div className="flex items-center gap-4 w-full max-w-xs bg-black/40 backdrop-blur-md p-3 rounded-2xl border border-white/10">
-                            <span className="text-white font-black text-xs">1x</span>
-                            <input type="range" min={capabilities.zoom.min || 1} max={capabilities.zoom.max || 5} step="0.1" value={zoomValue} onChange={handleZoomChange} className="flex-grow accent-yellow-500 h-1.5 rounded-full" />
-                            <span className="text-white font-black text-xs">{zoomValue.toFixed(1)}x</span>
+                      <div className="space-y-8">
+                        {capabilities?.zoom && (
+                          <div className="flex flex-col items-center gap-3">
+                            <div className="flex items-center gap-4 w-full max-w-xs bg-black/40 backdrop-blur-md p-3 rounded-2xl border border-white/10">
+                              <span className="text-white font-black text-xs">1x</span>
+                              <input type="range" min={capabilities.zoom.min || 1} max={capabilities.zoom.max || 5} step="0.1" value={zoomValue} onChange={handleZoomChange} className="flex-grow accent-yellow-500 h-1.5 rounded-full" />
+                              <span className="text-white font-black text-xs">{zoomValue.toFixed(1)}x</span>
+                            </div>
                           </div>
-                        </div>
-                      )}
-                      <div className="flex flex-col items-center gap-4">
-                        <button onClick={isRecording ? stopRecording : startRecording} className={`relative group/rec flex items-center justify-center w-24 h-24 rounded-full border-4 border-white backdrop-blur-md transition-all duration-500 ${isRecording ? 'scale-110' : 'hover:scale-105'} active:scale-95`}>
-                          <div className={`transition-all duration-500 ${isRecording ? 'w-10 h-10 rounded-xl bg-white animate-pulse' : 'w-16 h-16 rounded-full bg-red-600 group-hover/rec:bg-red-500'}`} />
-                          {isRecording && <div className="absolute inset-0 rounded-full border-4 border-white animate-ping opacity-40" />}
-                        </button>
-                        <div className={`px-6 py-2 rounded-full font-black text-xs uppercase tracking-[0.2em] transition-all duration-500 ${isRecording ? 'bg-red-600 text-white' : 'bg-black/40 text-white backdrop-blur-sm'}`}>
-                          {isRecording ? 'جاري التسجيل' : 'انقر للبدء'}
+                        )}
+                        <div className="flex flex-col items-center gap-4">
+                          <button onClick={isRecording ? stopRecording : startRecording} className={`relative group/rec flex items-center justify-center w-24 h-24 rounded-full border-4 border-white backdrop-blur-md transition-all duration-500 ${isRecording ? 'scale-110' : 'hover:scale-105'} active:scale-95`}>
+                            <div className={`transition-all duration-500 ${isRecording ? 'w-10 h-10 rounded-xl bg-white animate-pulse' : 'w-16 h-16 rounded-full bg-red-600 group-hover/rec:bg-red-500'}`} />
+                            {isRecording && <div className="absolute inset-0 rounded-full border-4 border-white animate-ping opacity-40" />}
+                          </button>
+                          <div className={`px-6 py-2 rounded-full font-black text-xs uppercase tracking-[0.2em] transition-all duration-500 ${isRecording ? 'bg-red-600 text-white' : 'bg-black/40 text-white backdrop-blur-sm'}`}>
+                            {isRecording ? 'جاري التسجيل' : 'انقر للبدء'}
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               )
             ) : (
