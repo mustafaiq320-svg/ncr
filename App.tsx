@@ -5,6 +5,16 @@ import { HazardCard } from './components/HazardCard';
 import { analyzeHazards } from './services/geminiService';
 import { AnalysisState, ErrorType } from './types';
 
+// تعريف الواجهات البرمجية الخاصة بـ AI Studio
+declare global {
+  interface Window {
+    aistudio: {
+      hasSelectedApiKey: () => Promise<boolean>;
+      openSelectKey: () => Promise<void>;
+    };
+  }
+}
+
 const App: React.FC = () => {
   const [mode, setMode] = useState<'image' | 'video'>('image');
   const [mediaData, setMediaData] = useState<{ data: string; mimeType: string } | null>(null);
@@ -23,7 +33,6 @@ const App: React.FC = () => {
   
   // Camera Controls State
   const [videoTrack, setVideoTrack] = useState<MediaStreamTrack | null>(null);
-  // Using any to support non-standard capabilities like zoom and torch which are not in standard MediaTrackCapabilities
   const [capabilities, setCapabilities] = useState<any | null>(null);
   const [zoomValue, setZoomValue] = useState(1);
   const [isTorchOn, setIsTorchOn] = useState(false);
@@ -39,7 +48,6 @@ const App: React.FC = () => {
     return () => stopCamera();
   }, [mode, mediaData]);
 
-  // Handle Recording Timer
   useEffect(() => {
     if (isRecording) {
       setRecordingSeconds(0);
@@ -63,36 +71,26 @@ const App: React.FC = () => {
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        }, 
+        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }, 
         audio: true 
       });
-      
       if (videoRef.current) videoRef.current.srcObject = stream;
-      
       const track = stream.getVideoTracks()[0];
       setVideoTrack(track);
-      
-      // Check for capabilities (Zoom/Torch)
-      // Casting track to any as getCapabilities is not always present in standard type definitions
       if (track && (track as any).getCapabilities) {
         const caps = (track as any).getCapabilities();
         setCapabilities(caps);
         if (caps && caps.zoom) setZoomValue(caps.zoom.min || 1);
       }
-      
       setAnalysis(prev => ({ ...prev, error: null, errorType: null }));
     } catch (err: any) {
-      let errorMessage = "حدث خطأ عند تشغيل الكاميرا.";
+      let errorMessage = "حدث خطأ عند تشغيل الكاميرا. يرجى التأكد من أنك تستخدم رابطاً آمناً (HTTPS).";
       let type: ErrorType = 'UNKNOWN';
       if (err.name === 'NotAllowedError') {
-        errorMessage = "تم رفض الوصول للكاميرا. يرجى تفعيل الصلاحيات للمتابعة.";
+        errorMessage = "تم رفض الوصول للكاميرا. يرجى تفعيل الصلاحيات من إعدادات المتصفح للمتابعة.";
         type = 'CAMERA_DENIED';
       } else if (err.name === 'NotFoundError') {
-        errorMessage = "لم يتم العثور على كاميرا في الجهاز.";
+        errorMessage = "لم يتم العثور على كاميرا. إذا كنت تستخدم متصفحاً على الكمبيوتر، تأكد من توصيل الكاميرا.";
         type = 'CAMERA_NOT_FOUND';
       }
       setAnalysis(prev => ({ ...prev, error: errorMessage, errorType: type }));
@@ -114,12 +112,8 @@ const App: React.FC = () => {
     setZoomValue(val);
     if (videoTrack && capabilities?.zoom) {
       try {
-        await videoTrack.applyConstraints({
-          advanced: [{ zoom: val } as any]
-        });
-      } catch (err) {
-        console.error("Failed to apply zoom", err);
-      }
+        await videoTrack.applyConstraints({ advanced: [{ zoom: val } as any] });
+      } catch (err) { console.error("Zoom error", err); }
     }
   };
 
@@ -127,13 +121,9 @@ const App: React.FC = () => {
     if (videoTrack && capabilities?.torch) {
       const nextState = !isTorchOn;
       try {
-        await videoTrack.applyConstraints({
-          advanced: [{ torch: nextState } as any]
-        });
+        await videoTrack.applyConstraints({ advanced: [{ torch: nextState } as any] });
         setIsTorchOn(nextState);
-      } catch (err) {
-        console.error("Failed to toggle torch", err);
-      }
+      } catch (err) { console.error("Torch error", err); }
     }
   };
 
@@ -162,12 +152,7 @@ const App: React.FC = () => {
     const file = e.target.files?.[0];
     if (file) {
       if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) {
-        setAnalysis({ 
-          loading: false, 
-          error: "يرجى اختيار صور أو فيديو فقط.", 
-          errorType: 'FILE_FORMAT',
-          result: null 
-        });
+        setAnalysis({ loading: false, error: "يرجى اختيار صور أو فيديو فقط.", errorType: 'FILE_FORMAT', result: null });
         return;
       }
       const reader = new FileReader();
@@ -179,14 +164,48 @@ const App: React.FC = () => {
     }
   };
 
+  const handleOpenKeySelection = async () => {
+    try {
+      await window.aistudio.openSelectKey();
+      // بعد اختيار المفتاح، نحاول التشغيل مرة أخرى
+      runAnalysis();
+    } catch (e) {
+      console.error("Failed to open key selection", e);
+    }
+  };
+
   const runAnalysis = async () => {
     if (!mediaData) return;
+    
+    // التحقق من وجود مفتاح API (اختياري حسب البيئة، لكنه يساعد في حل مشكلة "الرابط لا يعمل")
+    if (typeof window.aistudio !== 'undefined') {
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      if (!hasKey && !process.env.API_KEY) {
+        setAnalysis({ 
+          loading: false, 
+          error: "مفتاح API غير مفعل. يرجى ربط مفتاح صالح من خلال النقر على زر 'تفعيل الاتصال'.", 
+          errorType: 'AI_FAILED', 
+          result: null 
+        });
+        return;
+      }
+    }
+
     setAnalysis({ loading: true, error: null, errorType: null, result: null });
     try {
       const result = await analyzeHazards(mediaData.data, mediaData.mimeType);
       setAnalysis({ loading: false, error: null, errorType: null, result });
     } catch (err: any) {
-      setAnalysis({ loading: false, error: err.message, errorType: 'AI_FAILED', result: null });
+      if (err.message === "ENTITY_NOT_FOUND") {
+        setAnalysis({ 
+          loading: false, 
+          error: "لم يتم العثور على مشروع مفعل لمفتاح API هذا. يرجى اختيار مفتاح من مشروع مدفوع أو مفعل.", 
+          errorType: 'AI_FAILED', 
+          result: null 
+        });
+      } else {
+        setAnalysis({ loading: false, error: err.message, errorType: 'AI_FAILED', result: null });
+      }
     }
   };
 
@@ -212,7 +231,7 @@ const App: React.FC = () => {
             اكشف المخاطر <span className="text-transparent bg-clip-text bg-gradient-to-r from-yellow-500 to-amber-600">بلمحة بصر</span>
           </h2>
           <p className="text-slate-500 font-medium text-lg max-w-2xl mx-auto">
-            نظام SafeVision HSE يستخدم الذكاء الاصطناعي لرصد التهديدات وتأمين بيئة العمل بشكل استباقي.
+            نظام SafeVision HSE يستخدم الذكاء الاصطناعي لرصد التهديدات وتأمين بيئة العمل بشكل استباقي ومحترف.
           </p>
         </section>
 
@@ -244,25 +263,15 @@ const App: React.FC = () => {
               ) : (
                 <div className="relative w-full aspect-video group/camera">
                   <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
-                  
-                  {/* Camera Controls Overlay */}
                   <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20 flex flex-col justify-between p-6 opacity-0 group-hover/camera:opacity-100 transition-opacity duration-300">
-                    
-                    {/* Top Controls: Torch & Timer */}
                     <div className="flex justify-between items-start">
                       <div className="flex gap-4">
                         {capabilities?.torch && (
-                          <button 
-                            onClick={toggleTorch}
-                            className={`w-12 h-12 rounded-2xl flex items-center justify-center backdrop-blur-md transition-all ${isTorchOn ? 'bg-yellow-500 text-slate-900 shadow-lg shadow-yellow-500/40' : 'bg-black/40 text-white hover:bg-black/60'}`}
-                          >
-                            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
-                              <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
-                            </svg>
+                          <button onClick={toggleTorch} className={`w-12 h-12 rounded-2xl flex items-center justify-center backdrop-blur-md transition-all ${isTorchOn ? 'bg-yellow-500 text-slate-900 shadow-lg shadow-yellow-500/40' : 'bg-black/40 text-white hover:bg-black/60'}`}>
+                            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" /></svg>
                           </button>
                         )}
                       </div>
-                      
                       {isRecording && (
                         <div className="bg-red-600 text-white px-4 py-2 rounded-2xl flex items-center gap-3 shadow-xl animate-pulse">
                           <div className="w-2.5 h-2.5 bg-white rounded-full" />
@@ -270,27 +279,16 @@ const App: React.FC = () => {
                         </div>
                       )}
                     </div>
-
-                    {/* Bottom Controls: Zoom & Record Button */}
                     <div className="space-y-8">
                       {capabilities?.zoom && (
                         <div className="flex flex-col items-center gap-3">
                           <div className="flex items-center gap-4 w-full max-w-xs bg-black/40 backdrop-blur-md p-3 rounded-2xl border border-white/10">
                             <span className="text-white font-black text-xs">1x</span>
-                            <input 
-                              type="range" 
-                              min={capabilities.zoom.min || 1}
-                              max={capabilities.zoom.max || 5}
-                              step="0.1"
-                              value={zoomValue}
-                              onChange={handleZoomChange}
-                              className="flex-grow accent-yellow-500 h-1.5 rounded-full"
-                            />
+                            <input type="range" min={capabilities.zoom.min || 1} max={capabilities.zoom.max || 5} step="0.1" value={zoomValue} onChange={handleZoomChange} className="flex-grow accent-yellow-500 h-1.5 rounded-full" />
                             <span className="text-white font-black text-xs">{zoomValue.toFixed(1)}x</span>
                           </div>
                         </div>
                       )}
-
                       <div className="flex flex-col items-center gap-4">
                         <button onClick={isRecording ? stopRecording : startRecording} className={`relative group/rec flex items-center justify-center w-24 h-24 rounded-full border-4 border-white backdrop-blur-md transition-all duration-500 ${isRecording ? 'scale-110' : 'hover:scale-105'} active:scale-95`}>
                           <div className={`transition-all duration-500 ${isRecording ? 'w-10 h-10 rounded-xl bg-white animate-pulse' : 'w-16 h-16 rounded-full bg-red-600 group-hover/rec:bg-red-500'}`} />
@@ -354,7 +352,6 @@ const App: React.FC = () => {
               </button>
             </div>
 
-            {/* Overall Summary Card */}
             <div className="bg-gradient-to-br from-slate-900 to-slate-800 p-10 rounded-[3rem] shadow-2xl text-white relative overflow-hidden group">
               <div className="absolute top-0 left-0 w-64 h-64 bg-yellow-500/10 rounded-full blur-3xl -translate-x-1/2 -translate-y-1/2" />
               <div className="relative z-10">
@@ -368,7 +365,6 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            {/* Hazards Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
               {analysis.result.hazards.map((hazard, index) => (
                 <div key={index} className="animate-in fade-in slide-in-from-bottom-4" style={{ animationDelay: `${index * 150}ms` }}>
@@ -377,7 +373,6 @@ const App: React.FC = () => {
               ))}
             </div>
 
-            {/* Safety Disclaimer Footer */}
             <div className="bg-slate-50 p-8 rounded-[2.5rem] border border-slate-100 text-center">
               <p className="text-slate-400 text-sm font-bold leading-relaxed max-w-2xl mx-auto">
                 <span className="text-yellow-600 block mb-2 font-black uppercase tracking-widest text-[10px]">تنويه هام</span>
@@ -387,9 +382,9 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* Global Error Banner */}
+        {/* Global Error Banner / API Key Selection */}
         {analysis.error && (
-          <div className="fixed bottom-12 left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-xl bg-slate-900 text-white p-6 rounded-[2rem] shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-white/10 backdrop-blur-xl animate-in fade-in slide-in-from-bottom-8">
+          <div className="fixed bottom-12 left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-xl bg-slate-900 text-white p-6 rounded-[2rem] shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-white/10 backdrop-blur-xl animate-in fade-in slide-in-from-bottom-8 z-[100]">
             <div className="flex items-start gap-4">
               <div className="bg-red-500 p-3 rounded-2xl shrink-0 shadow-lg shadow-red-500/20">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
@@ -397,10 +392,22 @@ const App: React.FC = () => {
               <div className="flex-grow">
                 <h4 className="font-black text-lg text-red-400 mb-1">تنبيه فني</h4>
                 <p className="text-sm font-bold text-slate-300 leading-relaxed">{analysis.error}</p>
-                <div className="flex gap-4 mt-4">
+                <div className="flex flex-wrap gap-4 mt-4">
                   <button onClick={() => { if (analysis.errorType?.includes('CAMERA')) startCamera(); else runAnalysis(); }} className="px-6 py-2 bg-white text-slate-900 rounded-xl text-xs font-black shadow-lg hover:bg-yellow-400 transition-all active:scale-95">إعادة المحاولة</button>
+                  
+                  {/* زر اختيار مفتاح API في حالة وجود خطأ في الاتصال */}
+                  {analysis.error?.includes("API") || analysis.errorType === 'AI_FAILED' ? (
+                    <button onClick={handleOpenKeySelection} className="px-6 py-2 bg-yellow-500 text-slate-900 rounded-xl text-xs font-black shadow-lg hover:bg-yellow-400 transition-all active:scale-95">تفعيل الاتصال</button>
+                  ) : null}
+                  
                   <button onClick={() => setAnalysis(p => ({...p, error: null}))} className="px-6 py-2 bg-slate-800 text-slate-400 rounded-xl text-xs font-black hover:text-white transition-all">تجاهل</button>
                 </div>
+                
+                {analysis.error?.includes("API") && (
+                  <p className="text-[10px] mt-2 text-slate-500 font-bold">
+                    ملاحظة: يتطلب التطبيق مفتاح API صالح من <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline hover:text-yellow-500">مشروع GCP مدفوع</a> للعمل بشكل صحيح على GitHub.
+                  </p>
+                )}
               </div>
             </div>
           </div>
@@ -413,10 +420,7 @@ const App: React.FC = () => {
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
-        input[type=range] {
-          -webkit-appearance: none;
-          background: rgba(255,255,255,0.2);
-        }
+        input[type=range] { -webkit-appearance: none; background: rgba(255,255,255,0.2); }
         input[type=range]::-webkit-slider-thumb {
           -webkit-appearance: none;
           height: 18px;

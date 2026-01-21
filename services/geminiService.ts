@@ -3,7 +3,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { AnalysisResult } from "../types";
 
 export const analyzeHazards = async (base64Data: string, mimeType: string): Promise<AnalysisResult> => {
-  // Initialize right before call using process.env.API_KEY directly as per guidelines.
+  // إنشاء مثيل جديد من GoogleGenAI عند كل استدعاء لضمان استخدام أحدث مفتاح API مفعل
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   const prompt = `
@@ -18,7 +18,6 @@ export const analyzeHazards = async (base64Data: string, mimeType: string): Prom
 
   try {
     const response = await ai.models.generateContent({
-      // Use gemini-3-pro-preview for complex text and reasoning tasks
       model: "gemini-3-pro-preview",
       contents: {
         parts: [
@@ -66,8 +65,14 @@ export const analyzeHazards = async (base64Data: string, mimeType: string): Prom
     }
 
     return JSON.parse(resultText) as AnalysisResult;
-  } catch (error) {
+  } catch (error: any) {
     console.error("Hazard Analysis Error:", error);
-    throw new Error("فشل في تحليل المخاطر. يرجى المحاولة مرة أخرى.");
+    
+    // إذا كان الخطأ بسبب عدم العثور على المشروع أو الكيان (غالباً مشكلة في مفتاح API أو الفوترة)
+    if (error.message?.includes("Requested entity was not found")) {
+      throw new Error("ENTITY_NOT_FOUND");
+    }
+    
+    throw new Error(error.message || "فشل في تحليل المخاطر. يرجى المحاولة مرة أخرى.");
   }
 };
